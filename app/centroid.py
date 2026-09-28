@@ -15,7 +15,10 @@ conversion:
    ``relative_threshold`` are removed from consideration.
 3. Every flat-topped local-maximum interval (a maximal run of equal
    intensities strictly above its immediate neighbours) becomes one
-   candidate whose position is the midpoint of the plateau.
+   candidate whose position is the midpoint of the plateau; the midpoint
+   is formed as ``left/2 + right/2`` so two endpoints near the float
+   maximum cannot sum to infinity (which would make distinct plateaus
+   coincide in the NMS distance and nearest-candidate steps below).
 4. Candidates undergo ``min_separation`` non-maximum suppression in
    descending intensity order (equal intensity: lower mass first); a
    candidate closer than ``min_separation`` to an already kept candidate is
@@ -77,6 +80,21 @@ class CentroidResult:
     peaks: list[CentroidPeak]
 
 
+def _midpoint(left: float, right: float) -> float:
+    """Overflow-free mean of two finite masses.
+
+    ``(left + right) / 2`` overflows to ``inf`` when both endpoints sit
+    near the float maximum (two legal plateaus at ~1.7e308 can both carry
+    inf positions, after which NMS measures ``abs(inf - inf) == NaN`` and
+    treats them as coincident no matter how far apart they really are, and
+    nearest-candidate assignment collapses all points onto one winner).
+    Halving each endpoint before adding bounds both summands at half a
+    finite value, so the result is always finite for finite inputs; the
+    rounding error is the same single-ULP bound as the direct mean.
+    """
+    return left / 2.0 + right / 2.0
+
+
 def _find_candidates(
     masses: list[float],
     intensities: list[float],
@@ -109,9 +127,12 @@ def _find_candidates(
         if left_lower and right_lower:
             # Divide by the base peak before the *100 scale: a level near
             # the float maximum would make 100*level overflow before the
-            # same-magnitude division rescaled it.
+            # same-magnitude division rescaled it. The midpoint is formed
+            # without adding the endpoints, since two masses near the float
+            # maximum would sum to infinity and collapse the plateau's
+            # position onto inf for sorting, NMS and nearest-point assignment.
             candidates.append(
-                ((masses[i] + masses[j]) / 2.0, 100.0 * (level / base), i, j)
+                (_midpoint(masses[i], masses[j]), 100.0 * (level / base), i, j)
             )
         i = j + 1
     return candidates

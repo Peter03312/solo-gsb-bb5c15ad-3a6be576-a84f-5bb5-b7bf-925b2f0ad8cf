@@ -255,6 +255,80 @@ def test_giant_mass_and_intensity_centroid_stays_finite():
     assert peak.mass == pytest.approx(1.01e308, rel=1e-12)
 
 
+def test_flat_plateau_near_float_ceiling_has_finite_midpoint():
+    # A two-point plateau whose endpoint masses add to more than the float
+    # maximum used to get an inf plateau midpoint; the overflow-free
+    # half-each-endpoint form keeps the candidate position finite.
+    points = [
+        (1.70e308, 8.0),
+        (1.73e308, 10.0),
+        (1.76e308, 10.0),
+        (1.79e308, 8.0),
+    ]
+    res = centroid_profile(points, 0.0, 1e307)
+    assert res.candidate_count == 1
+    peak = res.peaks[0]
+    assert math.isfinite(peak.mass)
+    assert math.isfinite(peak.intensity)
+    assert math.isfinite(peak.total_intensity_percent)
+    assert peak.mass == pytest.approx(1.745e308, rel=1e-12)
+    assert peak.intensity == pytest.approx(100.0)
+
+
+def test_giant_mass_twin_plateaus_both_kept_with_finite_centroids():
+    # Regression: two flat-topped plateaus near the float ceiling whose
+    # separation exceeds min_separation. Their (left+right)/2 midpoints both
+    # overflowed to inf, so NMS measured abs(inf-inf)=NaN and dropped the
+    # second candidate as "coincident"; all points were then assigned to the
+    # single surviving peak. Both plateaus must now survive with finite
+    # centroids and their own intensity shares. Zero-intensity gaps keep the
+    # point assignment unambiguous (the giant-mass ULP is ~2e292).
+    step = 1e306
+    m0 = 1.0e308
+    points = [
+        (m0, 10.0),              # plateau A, indices 0-1
+        (m0 + step, 10.0),
+        (m0 + 2 * step, 0.0),    # zero gap
+        (m0 + 3 * step, 5.0),    # plateau B, indices 3-4
+        (m0 + 4 * step, 5.0),
+    ]
+    res = centroid_profile(points, 0.0, 2.0 * step)
+    assert res.candidate_count == 2
+    assert len(res.peaks) == 2
+    for peak in res.peaks:
+        assert math.isfinite(peak.mass)
+        assert math.isfinite(peak.intensity)
+        assert math.isfinite(peak.total_intensity_percent)
+    left, right = res.peaks
+    assert left.mass < right.mass
+    # Each plateau owns exactly its own points, so the centroid equals the
+    # (overflow-free) plateau midpoint and the shares are 20/30 and 10/30.
+    assert left.mass == pytest.approx(1.005e308, rel=1e-12)
+    assert right.mass == pytest.approx(1.035e308, rel=1e-12)
+    assert left.intensity == pytest.approx(100.0)
+    assert right.intensity == pytest.approx(50.0)
+    assert left.total_intensity_percent == pytest.approx(100.0 * 20.0 / 30.0)
+    assert right.total_intensity_percent == pytest.approx(100.0 * 10.0 / 30.0)
+
+
+def test_giant_mass_nms_still_suppresses_genuinely_close_pair():
+    # The overflow fix must not loosen NMS: two maxima genuinely closer than
+    # min_separation still collapse to one peak.
+    step = 1e306
+    m0 = 1.0e308
+    points = [
+        (m0, 10.0),
+        (m0 + step, 10.0),
+        (m0 + 2 * step, 1.0),
+        (m0 + 3 * step, 5.0),
+        (m0 + 4 * step, 5.0),
+    ]
+    res = centroid_profile(points, 0.0, 4.0 * step)
+    assert res.candidate_count == 2
+    assert len(res.peaks) == 1
+    assert math.isfinite(res.peaks[0].mass)
+
+
 def test_plateau_midpoint_between_grid_points():
     # Even-length plateau (indices 1-2): midpoint lies between grid points.
     points = grid_profile([0.0, 5.0, 5.0, 0.0])
@@ -592,3 +666,36 @@ def test_api_large_finite_intensities_return_finite_200(client):
     assert peak["mass"] == pytest.approx(101.0, abs=1e-6)
     assert peak["intensity"] == pytest.approx(100.0)
     assert peak["total_intensity_percent"] == pytest.approx(100.0)
+
+
+def test_api_giant_mass_twin_plateaus_return_two_finite_peaks(client):
+    # Regression: plateau endpoints near the float ceiling summed to infinity
+    # in the midpoint, making two well-separated plateaus look coincident so
+    # the response collapsed to a single peak carrying 100% of the intensity.
+    import math as _math
+
+    step = 1e306
+    m0 = 1.0e308
+    levels = [10.0, 10.0, 0.0, 5.0, 5.0]
+    payload = {
+        "profile": [
+            {"mass": m0 + k * step, "intensity": value}
+            for k, value in enumerate(levels)
+        ],
+        "relative_threshold": 0.0,
+        "min_separation": 2.0 * step,
+    }
+    resp = client.post("/api/v1/profile-centroid", json=payload)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["candidate_count"] == 2
+    assert body["peak_count"] == 2
+    for peak in body["peaks"]:
+        for key in ("mass", "intensity", "total_intensity_percent"):
+            assert _math.isfinite(peak[key]), (key, peak[key])
+    left, right = body["peaks"]
+    assert left["mass"] < right["mass"]
+    assert left["intensity"] == pytest.approx(100.0)
+    assert right["intensity"] == pytest.approx(50.0)
+    assert left["total_intensity_percent"] == pytest.approx(100.0 * 20.0 / 30.0)
+    assert right["total_intensity_percent"] == pytest.approx(100.0 * 10.0 / 30.0)

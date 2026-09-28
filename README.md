@@ -275,6 +275,19 @@ curl -X POST http://localhost:8000/api/v1/neutral-profile \
 
 按同一因子整体放大或缩小所有强度不改变质心、归一化强度与百分比拆分；平顶峰判定、等距点归低质量候选的最近候选分配以及质量升序排序均不受缩放影响。
 
+**极大质量平台的数值稳定性**：除强度外，平台两端点的 `mass` 也允许接近浮点上界（最大约 1.8×10³⁰⁸）。平顶候选的中点按 `left/2 + right/2`（先各除以 2 再相加）计算，而非会溢出的 `(left + right)/2`——两个端点都接近浮点上界时直接相加得到无穷大，会令相距超过 `min_separation` 的两个平台中点都变成 `inf`，NMS 以 `abs(inf − inf) = NaN` 把它们误判为"同位置"而抑制掉一个，随后最近候选归属也把全部点并给唯一幸存峰，最终响应只剩一个峰。无溢出中点同时参与**候选排序、最小间隔抑制与最近候选归属**；因此两个极大质量平台各自返回有限质心与各自强度份额（平台质量过大致使 `m·w` 累计溢出时，质心仍走既有的按最大成员质量等比缩放的兜底路径）。普通质量范围的结果与既有网格校验规则（严格递增、1e-6 等间距容差）保持完全一致。
+
+例如质量约 1e308、网格步长 1e306 的两个平顶峰（两端点之和超过浮点最大值），`min_separation=2e306` 时两峰都保留，质心与份额均有限；接口地址为 `http://localhost:8000/api/v1/profile-centroid`：
+
+```bash
+curl -X POST http://localhost:8000/api/v1/profile-centroid \
+  -H 'Content-Type: application/json' \
+  -d '{"relative_threshold":0.0,"min_separation":2e306,
+       "profile":[{"mass":1.0e308,"intensity":10.0},{"mass":1.01e308,"intensity":10.0},
+                  {"mass":1.02e308,"intensity":0.0},{"mass":1.03e308,"intensity":5.0},
+                  {"mass":1.04e308,"intensity":5.0}]}'
+```
+
 非法输入返回带字段（必要时带 0 基点索引）的 422：
 
 - 点数不在 3～20000、强度为负或非有限：`error` 为 `invalid_profile`，`field` 为 `profile`（索引问题附 `index`）；
