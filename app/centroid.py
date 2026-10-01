@@ -15,7 +15,9 @@ conversion:
    ``relative_threshold`` are removed from consideration.
 3. Every flat-topped local-maximum interval (a maximal run of equal
    intensities strictly above its immediate neighbours) becomes one
-   candidate whose position is the midpoint of the plateau.
+   candidate whose position is the midpoint of the plateau, computed
+   without overflow so two plateaus near the float maximum keep their
+   distinct finite positions.
 4. Candidates undergo ``min_separation`` non-maximum suppression in
    descending intensity order (equal intensity: lower mass first); a
    candidate closer than ``min_separation`` to an already kept candidate is
@@ -77,6 +79,18 @@ class CentroidResult:
     peaks: list[CentroidPeak]
 
 
+def _midpoint(a: float, b: float) -> float:
+    """Overflow-free midpoint of two finite masses.
+
+    ``(a + b) / 2`` overflows to ``inf`` when both endpoints approach the
+    float maximum (~1.8e308); halving each endpoint before adding keeps the
+    midpoint finite for every finite input pair, so candidate sorting,
+    ``min_separation`` suppression and nearest-candidate assignment never
+    see an infinite plateau position.
+    """
+    return a / 2.0 + b / 2.0
+
+
 def _find_candidates(
     masses: list[float],
     intensities: list[float],
@@ -109,9 +123,13 @@ def _find_candidates(
         if left_lower and right_lower:
             # Divide by the base peak before the *100 scale: a level near
             # the float maximum would make 100*level overflow before the
-            # same-magnitude division rescaled it.
+            # same-magnitude division rescaled it. The plateau midpoint is
+            # likewise formed without summing the endpoints: two endpoint
+            # masses near the float maximum would overflow to inf, and
+            # inf - inf = NaN in the suppression step would merge two
+            # genuinely separated plateaus into one reported peak.
             candidates.append(
-                ((masses[i] + masses[j]) / 2.0, 100.0 * (level / base), i, j)
+                (_midpoint(masses[i], masses[j]), 100.0 * (level / base), i, j)
             )
         i = j + 1
     return candidates

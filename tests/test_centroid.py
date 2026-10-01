@@ -255,6 +255,48 @@ def test_giant_mass_and_intensity_centroid_stays_finite():
     assert peak.mass == pytest.approx(1.01e308, rel=1e-12)
 
 
+def test_giant_mass_plateau_midpoint_stays_finite():
+    # A two-point plateau whose endpoints sum to more than the float
+    # maximum: the midpoint must still be finite (formed as a/2 + b/2).
+    points = [
+        (1.79e308, 0.0),
+        (1.7901e308, 5.0),
+        (1.7902e308, 5.0),
+        (1.7903e308, 0.0),
+    ]
+    res = centroid_profile(points, 0.0, 1e303)
+    assert res.candidate_count == 1
+    peak = res.peaks[0]
+    assert math.isfinite(peak.mass)
+    assert peak.mass == pytest.approx(1.79015e308, rel=1e-12)
+
+
+def test_giant_mass_two_plateaus_not_merged_by_nms():
+    # Regression: both plateau midpoints overflowed to inf, and
+    # inf - inf = NaN failed the min_separation check, so the second
+    # plateau was suppressed and only one peak was reported.
+    step = 1e304
+    base_mass = 1.5e308
+    levels = [0.0, 5.0, 5.0, 0.0, 0.0, 0.0, 8.0, 8.0, 8.0, 0.0]
+    points = [(base_mass + k * step, v) for k, v in enumerate(levels)]
+    res = centroid_profile(points, 0.0, 1e303)
+    assert res.candidate_count == 2
+    assert len(res.peaks) == 2
+    weak, strong = res.peaks
+    for peak in res.peaks:
+        assert math.isfinite(peak.mass)
+        assert math.isfinite(peak.intensity)
+        assert math.isfinite(peak.total_intensity_percent)
+    # Each plateau owns exactly its own points, so each centroid lands on
+    # the plateau midpoint (indices 1-2 and 6-8).
+    assert weak.mass == pytest.approx(1.50015e308, rel=1e-12)
+    assert strong.mass == pytest.approx(1.5007e308, rel=1e-12)
+    assert weak.intensity == pytest.approx(62.5)
+    assert strong.intensity == pytest.approx(100.0)
+    assert weak.total_intensity_percent == pytest.approx(100.0 * 10.0 / 34.0)
+    assert strong.total_intensity_percent == pytest.approx(100.0 * 24.0 / 34.0)
+
+
 def test_plateau_midpoint_between_grid_points():
     # Even-length plateau (indices 1-2): midpoint lies between grid points.
     points = grid_profile([0.0, 5.0, 5.0, 0.0])
@@ -592,3 +634,41 @@ def test_api_large_finite_intensities_return_finite_200(client):
     assert peak["mass"] == pytest.approx(101.0, abs=1e-6)
     assert peak["intensity"] == pytest.approx(100.0)
     assert peak["total_intensity_percent"] == pytest.approx(100.0)
+
+
+def test_api_giant_mass_two_plateaus_both_returned(client):
+    # Regression: plateau endpoints near the float maximum overflowed the
+    # midpoint sum to inf; inf - inf = NaN then failed the min_separation
+    # check, so the second plateau was suppressed and only one peak came
+    # back. Both plateaus must now return finite centroids and shares.
+    import math as _math
+
+    step = 1e304
+    base_mass = 1.5e308
+    levels = [0.0, 5.0, 5.0, 0.0, 0.0, 0.0, 8.0, 8.0, 8.0, 0.0]
+    payload = {
+        "profile": [
+            {"mass": base_mass + k * step, "intensity": v}
+            for k, v in enumerate(levels)
+        ],
+        "relative_threshold": 0.0,
+        "min_separation": 1e303,
+    }
+    resp = client.post("/api/v1/profile-centroid", json=payload)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["candidate_count"] == 2
+    assert body["peak_count"] == 2
+    weak, strong = body["peaks"]
+    for peak in body["peaks"]:
+        for key in ("mass", "intensity", "total_intensity_percent"):
+            assert isinstance(peak[key], float)
+            assert _math.isfinite(peak[key]), (key, peak[key])
+    assert weak["mass"] == pytest.approx(1.50015e308, rel=1e-9)
+    assert strong["mass"] == pytest.approx(1.5007e308, rel=1e-9)
+    assert weak["intensity"] == pytest.approx(62.5)
+    assert strong["intensity"] == pytest.approx(100.0)
+    assert weak["total_intensity_percent"] == pytest.approx(100.0 * 10.0 / 34.0)
+    assert strong["total_intensity_percent"] == pytest.approx(100.0 * 24.0 / 34.0)
+    total = sum(p["total_intensity_percent"] for p in body["peaks"])
+    assert total == pytest.approx(100.0)
